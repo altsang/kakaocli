@@ -117,7 +117,11 @@ public final class KakaoAutomator {
             if chatWindow != nil { break }
         }
         guard let chatWindow else {
-            throw AutomationError.inputFieldNotFound
+            // Deliberately not `inputFieldNotFound`. These are different
+            // failures — the chat never opened vs. it opened without a text box
+            // — and reporting both as "Could not find the message input field"
+            // made a send failure undiagnosable from the message alone.
+            throw AutomationError.chatWindowNeverOpened(chatName)
         }
 
         // 7b. Confirm we opened the chat we were asked for, before typing.
@@ -141,9 +145,26 @@ public final class KakaoAutomator {
             throw AutomationError.wrongChatOpened(asked: chatName, opened: openedTitle)
         }
 
-        // 8. Find the message input field
-        guard let inputField = findInputField(in: chatWindow) else {
-            throw AutomationError.inputFieldNotFound
+        // 8. Find the message input field.
+        //
+        // Polled, not read once. Step 7 returns the instant the window exists,
+        // but AppKit fills an accessibility tree in asynchronously — so a
+        // single read here is a race, lost whenever the open is slow. Opening
+        // from a *search result* is the slow case: the list was just
+        // repopulated, and the window is built from a chat that wasn't on
+        // screen a moment ago.
+        var inputField: AXUIElement?
+        let fieldDeadline = Date().addingTimeInterval(4.0)
+        while true {
+            inputField = findInputField(in: chatWindow)
+            if inputField != nil || Date() >= fieldDeadline { break }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        guard let inputField else {
+            // Carry the tree we actually got. Without it the only way to learn
+            // why the field wasn't there is to reproduce a failure that only
+            // happens sometimes, while watching.
+            throw AutomationError.inputFieldNotFound(describe(chatWindow))
         }
 
         // 9. Focus and type the message
@@ -187,12 +208,31 @@ public final class KakaoAutomator {
         return nil
     }
 
+    /// The window's shape, for a failure message — child roles, what each
+    /// scroll area holds, and whether there is an `AXTextArea` anywhere at all.
+    ///
+    /// `findInputField` only looks at direct children of the window and direct
+    /// children of a scroll area. If KakaoTalk ever nests the input one level
+    /// deeper, that rule fails while a text area sits right there; this is what
+    /// tells the two apart.
+    private func describe(_ window: AXUIElement) -> String {
+        let kids = AXHelpers.children(window).map { child -> String in
+            let role = AXHelpers.role(child) ?? "?"
+            guard role == "AXScrollArea" else { return role }
+            let inner = AXHelpers.children(child).compactMap { AXHelpers.role($0) }
+            return "AXScrollArea(\(inner.joined(separator: "+")))"
+        }
+        let anywhere = AXHelpers.findAll(window, role: "AXTextArea").count
+        return "children [\(kids.joined(separator: ", "))], "
+            + "\(anywhere) AXTextArea anywhere in the window"
+    }
 }
 
 public enum AutomationError: Error, CustomStringConvertible {
     case noWindows
     case chatNotFound(String)
-    case inputFieldNotFound
+    case chatWindowNeverOpened(String)
+    case inputFieldNotFound(String)
     case sendFailed(String)
     case wrongChatOpened(asked: String, opened: String)
     case chatInFolder(String)
@@ -203,8 +243,14 @@ public enum AutomationError: Error, CustomStringConvertible {
             return "KakaoTalk has no open windows"
         case .chatNotFound(let name):
             return "Chat '\(name)' not found in the chat list"
-        case .inputFieldNotFound:
-            return "Could not find the message input field"
+        case .chatWindowNeverOpened(let name):
+            return """
+                Selected '\(name)' and pressed Enter, but no chat window \
+                appeared within 5s. Nothing was typed and nothing was sent — \
+                retry.
+                """
+        case .inputFieldNotFound(let shape):
+            return "The chat window opened but has no message input field — \(shape)"
         case .sendFailed(let msg):
             return "Failed to send message: \(msg)"
         case .chatInFolder(let name):
