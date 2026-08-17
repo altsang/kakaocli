@@ -88,16 +88,34 @@ public final class KakaoAutomator {
             }
         }
 
-        // 6. Open the chat via AX row selection + Enter (works even when off-screen).
-        //    Falls back to scroll-into-view + double-click if selection fails.
+        // 6. Open the chat. A row from the top-level list goes by AX selection +
+        //    Enter, which works even when off-screen; a row reached through
+        //    search can only be clicked (see below).
         var opened = false
         let activeTable = usedSearch ? (AXHelpers.chatListTable(mainWindow) ?? table) : table
-        if AXHelpers.selectRow(row, in: activeTable) {
+        // Enter is skipped entirely for a chat reached through search, because
+        // it cannot work there and pressing it only wastes the wait. Measured
+        // against this KakaoTalk build (`inspect --probe-row`):
+        //
+        //   focus before:  AXTextField id=_NS:20     ← the search box
+        //   set focus row: false                      ← AXFocused isn't an attribute
+        //   row actions:   []                         ← no AXPress to perform either
+        //   focus after:   AXTextField id=_NS:20     ← selecting doesn't move it
+        //
+        // Selecting a row does not move keyboard focus out of the search field,
+        // the row cannot be given focus, and it advertises no actions — so a
+        // click is the only way in, and it stays the fallback below.
+        if !usedSearch, AXHelpers.selectRow(row, in: activeTable) {
             Thread.sleep(forTimeInterval: 0.2)
             AXHelpers.pressKey(keyCode: 36) // Enter to open
             Thread.sleep(forTimeInterval: 0.5)
             let checkWindows = AXHelpers.windows(app)
             opened = checkWindows.contains { AXHelpers.identifier($0) != "Main Window" }
+        } else if usedSearch {
+            // Still select it: step 7b compares the opened window's title
+            // against the chat we asked for, and a selected row is the thing
+            // the click is aimed at.
+            _ = AXHelpers.selectRow(row, in: activeTable)
         }
         if !opened {
             if let scrollArea = AXHelpers.chatListScrollArea(mainWindow) {

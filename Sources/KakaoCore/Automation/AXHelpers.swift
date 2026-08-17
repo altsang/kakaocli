@@ -441,6 +441,26 @@ public enum AXHelpers {
         return result == .success
     }
 
+    /// The actions an element advertises (`AXPress`, `AXOpen`, …).
+    ///
+    /// Worth asking before synthesising a mouse event at an element's
+    /// coordinates: an action is delivered to the element itself, so it cannot
+    /// land on whatever slid under those coordinates in the meantime.
+    public static func actionNames(_ element: AXUIElement) -> [String] {
+        var names: CFArray?
+        guard AXUIElementCopyActionNames(element, &names) == .success,
+              let list = names as? [String] else { return [] }
+        return list
+    }
+
+    /// The attributes an element exposes, for working out what can be set.
+    public static func attributeNames(_ element: AXUIElement) -> [String] {
+        var names: CFArray?
+        guard AXUIElementCopyAttributeNames(element, &names) == .success,
+              let list = names as? [String] else { return [] }
+        return list
+    }
+
     /// Get the parent of an AXUIElement.
     public static func parent(_ element: AXUIElement) -> AXUIElement? {
         var value: AnyObject?
@@ -550,19 +570,36 @@ public enum AXHelpers {
     }
 
     /// Double-click at the center of an element using CGEvent.
+    ///
+    /// `mouseEventClickState` is the click's **ordinal in the sequence** — 1 for
+    /// the first, 2 for the second — not a flag meaning "double". This used to
+    /// post two clicks both labelled 2, with no click 1 anywhere, which is not
+    /// a sequence AppKit recognises: `NSEvent.clickCount` never reached 2, so a
+    /// row that opens on double-click was clicked twice and never opened. That
+    /// is the only way left to reach a chat found through search, whose row
+    /// advertises no actions and cannot take keyboard focus.
+    ///
+    /// The cursor is moved first and settles: posting a click at a point the
+    /// mouse has never visited leaves the hit-test to the same event, which
+    /// some views handle by ignoring the first click.
     public static func doubleClickElement(_ element: AXUIElement) {
         guard let pos = position(element), let sz = size(element) else { return }
         let center = CGPoint(x: pos.x + sz.width / 2, y: pos.y + sz.height / 2)
-        for _ in 0..<2 {
-            if let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: center, mouseButton: .left),
-               let mouseUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: center, mouseButton: .left) {
-                mouseDown.setIntegerValueField(.mouseEventClickState, value: 2)
-                mouseUp.setIntegerValueField(.mouseEventClickState, value: 2)
-                mouseDown.post(tap: .cghidEventTap)
-                usleep(20000)
-                mouseUp.post(tap: .cghidEventTap)
-                usleep(20000)
-            }
+        moveMouse(to: center)
+        usleep(30000)
+        for clickState in Int64(1)...Int64(2) {
+            guard
+                let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: center, mouseButton: .left),
+                let mouseUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: center, mouseButton: .left)
+            else { return }
+            mouseDown.setIntegerValueField(.mouseEventClickState, value: clickState)
+            mouseUp.setIntegerValueField(.mouseEventClickState, value: clickState)
+            mouseDown.post(tap: .cghidEventTap)
+            usleep(20000)
+            mouseUp.post(tap: .cghidEventTap)
+            // Well inside the system double-click interval (default 0.5s), so
+            // the two clicks are read as one double-click rather than two.
+            usleep(40000)
         }
     }
 }

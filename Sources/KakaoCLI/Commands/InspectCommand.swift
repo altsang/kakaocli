@@ -21,6 +21,12 @@ struct InspectCommand: ParsableCommand {
     @Flag(name: .long, help: "Dismiss any active chat search and restore the full list")
     var clearSearch = false
 
+    @Option(name: .long, help: "Find a chat the way `send` does and report what its row supports, without opening it")
+    var probeRow: String?
+
+    @Option(name: .long, help: "How --probe-row should try to activate the row: none, enter, single, double, cursor")
+    var activate: String = "none"
+
     func run() throws {
         let bundleId = "com.kakao.KakaoTalkMac"
         try AXHelpers.activateApp(bundleId: bundleId)
@@ -41,6 +47,102 @@ struct InspectCommand: ParsableCommand {
             let ok = AXHelpers.clearChatSearch(in: mainWindow)
             let rows = AXHelpers.chatListTable(mainWindow).map { AXHelpers.children($0).filter { AXHelpers.role($0) == "AXRow" }.count } ?? 0
             print(ok ? "Search cleared — \(rows) chats listed" : "Could NOT clear the search — \(rows) chats listed")
+            return
+        }
+
+        if let chatName = probeRow {
+            // Reproduces `send`'s lookup exactly, then stops. Nothing is typed,
+            // nothing is opened, nothing is sent — this only reports what the
+            // row it found is capable of, so the way to activate it can be
+            // chosen from evidence instead of guessed at.
+            guard let mainWindow = windows.first(where: { AXHelpers.identifier($0) == "Main Window" }) else {
+                print("Could not find main window")
+                throw ExitCode.failure
+            }
+            if let tab = AXHelpers.findFirst(mainWindow, role: "AXCheckBox", identifier: "chatrooms") {
+                _ = AXHelpers.performAction(tab, kAXPressAction as String)
+                Thread.sleep(forTimeInterval: 0.3)
+            }
+            AXHelpers.clearChatSearch(in: mainWindow)
+            guard let table0 = AXHelpers.chatListTable(mainWindow) else {
+                print("No chat list table")
+                throw ExitCode.failure
+            }
+            var viaSearch = false
+            var row = AXHelpers.findChatRow(table0, chatName: chatName)
+            if row == nil {
+                row = AXHelpers.searchChatRow(in: mainWindow, chatName: chatName)
+                viaSearch = row != nil
+            }
+            guard let row else {
+                AXHelpers.clearChatSearch(in: mainWindow)
+                print("not found: \(chatName)")
+                throw ExitCode.failure
+            }
+            let table = AXHelpers.chatListTable(mainWindow) ?? table0
+            print("found via: \(viaSearch ? "search (inside a folder)" : "top-level list")")
+            print("row role:      \(AXHelpers.role(row) ?? "?")")
+            print("row actions:   \(AXHelpers.actionNames(row))")
+            print("row attrs:     \(AXHelpers.attributeNames(row).joined(separator: " "))")
+            print("row position:  \(String(describing: AXHelpers.position(row))) size: \(String(describing: AXHelpers.size(row)))")
+            print("table actions: \(AXHelpers.actionNames(table))")
+            print("rows in table: \(AXHelpers.children(table).filter { AXHelpers.role($0) == "AXRow" }.count)")
+            // Where the keyboard actually is. Enter is delivered here, which is
+            // why it does nothing after a search.
+            var focused: AnyObject?
+            let app2 = try AXHelpers.appElement(bundleId: bundleId)
+            if AXUIElementCopyAttributeValue(app2, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+               let element = focused {
+                // swiftlint:disable:next force_cast
+                let e = element as! AXUIElement
+                print("focus before:  \(AXHelpers.role(e) ?? "?") id=\(AXHelpers.identifier(e) ?? "-")")
+            } else {
+                print("focus before:  (none reported)")
+            }
+            print("set focus row: \(AXHelpers.focus(row))")
+            print("select row:    \(AXHelpers.selectRow(row, in: table))")
+            Thread.sleep(forTimeInterval: 0.3)
+            if AXUIElementCopyAttributeValue(app2, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+               let element = focused {
+                // swiftlint:disable:next force_cast
+                let e = element as! AXUIElement
+                print("focus after:   \(AXHelpers.role(e) ?? "?") id=\(AXHelpers.identifier(e) ?? "-")")
+            } else {
+                print("focus after:   (none reported)")
+            }
+            print("windows now:   \(AXHelpers.windows(app).count)")
+
+            // Try one activation method and report whether a window appeared.
+            // `cursor` posts only a mouse *move* and reads the pointer back —
+            // it settles whether synthetic events reach the window server at
+            // all, which nothing above can tell us: selectRow and setValue are
+            // AX calls, while Enter and the click are CGEvents.
+            if activate != "none", let pos = AXHelpers.position(row), let sz = AXHelpers.size(row) {
+                let center = CGPoint(x: pos.x + sz.width / 2, y: pos.y + sz.height / 2)
+                switch activate {
+                case "cursor":
+                    let before = CGEvent(source: nil)?.location ?? .zero
+                    AXHelpers.moveMouse(to: center)
+                    usleep(200_000)
+                    let after = CGEvent(source: nil)?.location ?? .zero
+                    print("cursor:        \(before) → \(after), wanted \(center)")
+                    AXHelpers.moveMouse(to: before)          // put it back
+                case "enter":
+                    AXHelpers.pressKey(keyCode: 36)
+                case "single":
+                    AXHelpers.clickElement(row)
+                case "double":
+                    AXHelpers.doubleClickElement(row)
+                default:
+                    print("unknown --activate \(activate)")
+                }
+                Thread.sleep(forTimeInterval: 1.5)
+                let after = AXHelpers.windows(app)
+                print("after \(activate):  \(after.count) windows"
+                    + (after.count > 1 ? " — OPENED: \(after.compactMap { AXHelpers.title($0) })" : " — nothing opened"))
+            }
+
+            if viaSearch { AXHelpers.clearChatSearch(in: mainWindow) }
             return
         }
 
